@@ -56,7 +56,11 @@ def build(db: Connection, *, region: str, periods: list[dict], policy: AnalysisP
             row = snapshot["areas"].get(key)
             if row is None:
                 points.append({"period": snapshot["label"], "present": False,
-                               "exposed": 0, "reports": 0, "substantiated": 0,
+                               "exposed": 0, "attributed_people": 0,
+                               "shared_people": 0, "unallocated_people": 0,
+                               "activity_count": 0, "joint_activity_count": 0,
+                               "attribution_basis": None,
+                               "reports": 0, "substantiated": 0,
                                "pending": 0, "substantiated_rate_bp": None,
                                "coverage_complete": None, "rate_delta_bp": None})
                 previous = None
@@ -66,6 +70,12 @@ def build(db: Connection, *, region: str, periods: list[dict], policy: AnalysisP
             delta = round(rate - prior_rate, 2) if rate is not None and prior_rate is not None else None
             points.append({"period": snapshot["label"], "present": True,
                            "exposed": row["exposed"], "nonresponse": row["nonresponse"],
+                           "attributed_people": row.get("attributed_people", 0),
+                           "shared_people": row.get("shared_people", 0),
+                           "unallocated_people": row.get("unallocated_people", 0),
+                           "activity_count": row.get("activity_count", 0),
+                           "joint_activity_count": row.get("joint_activity_count", 0),
+                           "attribution_basis": row.get("attribution_basis"),
                            "reports": row["reports"], "substantiated": row["substantiated"],
                            "pending": row["pending"], "inconclusive": row["inconclusive"],
                            "substantiated_rate_bp": rate,

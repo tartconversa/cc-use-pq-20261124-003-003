@@ -35,8 +35,7 @@ def decode(text: str, *, kind: str, batch_id: str, source_ref: str,
                 continue
             if not any((value or "").strip() for value in row.values()):
                 continue
-            records.append({"kind": kind, "data": {key: value if value != "" else None
-                                                       for key, value in row.items()}})
+            records.append({"kind": kind, "data": _shape(kind, row, errors, number)})
             physical_lines.append(number)
             if len(records) > MAX_RECORDS:
                 raise invalid("csv_records", "CSV 输入最多包含 500 条记录")
@@ -57,6 +56,35 @@ def decode(text: str, *, kind: str, batch_id: str, source_ref: str,
                            separators=(",", ":")).encode("utf-8")
     return {**bundle, "record_count": len(records), "source_digest": hashlib.sha256(canonical).hexdigest(),
             "byte_count": len(raw), "header": headers, "validation": checked}
+
+
+JSON_COLUMNS = {"touches": {"participants"}, "cases": {"respondent_provider_ids"}}
+DEFAULTED_COLUMNS = {"touches": {"participants_complete"}, "cases": {"scope"}}
+
+
+def _shape(kind: str, row: dict, errors: list[dict], number: int) -> dict:
+    """CSV 单元格转为契约字段；JSON 列保留结构而不是整段字符串。"""
+    json_columns = JSON_COLUMNS.get(kind, set())
+    defaulted = DEFAULTED_COLUMNS.get(kind, set())
+    data = {}
+    for key, value in row.items():
+        if value == "" or value is None:
+            if key not in json_columns and key not in defaulted:
+                data[key] = None
+            continue
+        if key in json_columns:
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                errors.append({"line": number, "code": "csv_json_column", "column": key})
+                continue
+            if not isinstance(parsed, list):
+                errors.append({"line": number, "code": "csv_json_column", "column": key})
+                continue
+            data[key] = parsed
+        else:
+            data[key] = value
+    return data
 
 
 def encode(headers: list[str], rows: list[dict]) -> str:

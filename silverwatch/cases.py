@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from sqlite3 import Connection
 
-from silverwatch import evidence
+from silverwatch import attribution, evidence
 from silverwatch.contracts import Case, Remediation, ReviewDecision
 from silverwatch.digest import digest
 from silverwatch.errors import conflict, invalid, missing
@@ -19,10 +19,18 @@ def create(db: Connection, body: Case, source_ref: str, revision: int) -> dict:
     if batch is None:
         raise missing("touch_batch", body.batch_id)
     touch = batch["payload"]
-    if touch["provider_id"] != body.provider_id or touch["region"] == "":
-        raise invalid("case_scope", "线索归属与触达批次不一致")
+    payload = body.model_dump(mode="json")
+    try:
+        targets = attribution.case_targets_for(payload, touch)
+    except (KeyError, ValueError) as exc:
+        raise invalid("case_scope", "线索归属与触达批次不一致", {"reason": str(exc)}) from exc
+    unknown = sorted(set(targets["respondent_provider_ids"]) - providers)
+    if unknown:
+        raise missing("provider", unknown[0])
+    if not payload["respondent_provider_ids"]:
+        payload["respondent_provider_ids"] = targets["respondent_provider_ids"]
     return append(db, "case", body.case_id, revision, source_ref,
-                  body.model_dump(mode="json"), body.reported_at)
+                  payload, body.reported_at)
 
 
 def decisions(db: Connection, case_id: str, *, cut: int | None = None,
@@ -95,8 +103,10 @@ def add_remediation(db: Connection, body: Remediation) -> dict:
     resolved = finding(db, body.case_id)
     if resolved["finding"] != "substantiated":
         raise conflict("case_not_substantiated", "只有两岗位一致确认的案件可以制定整改")
-    if body.provider_id not in {row["payload"]["provider_id"] for row in current_entities(db, "case")
-                                if row["entity_id"] == body.case_id}:
+    case_row = next((row for row in current_entities(db, "case")
+                     if row["entity_id"] == body.case_id), None)
+    respondents = attribution.case_respondents(case_row["payload"]) if case_row else []
+    if body.provider_id not in respondents:
         raise invalid("remediation_provider", "整改提供方与案件不匹配")
     prior = [row for row in current_entities(db, "remediation") if row["entity_id"] == body.action_id]
     if prior:

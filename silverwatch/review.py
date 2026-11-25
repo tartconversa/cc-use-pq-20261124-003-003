@@ -6,7 +6,7 @@ from sqlite3 import Connection
 
 from pydantic import ValidationError
 
-from silverwatch import cases
+from silverwatch import attribution, cases
 from silverwatch.contracts import Case, CaseEvidence, Remediation, ReviewDecision
 from silverwatch.errors import conflict, invalid, missing
 from silverwatch.ledger import append, current_entities, latest
@@ -61,9 +61,13 @@ def close(db: Connection, case_id: str, expected_finding: str, revision: int) ->
 
 
 def cases_for_provider(db: Connection, provider_id: str, *, cut: int | None = None) -> list[dict]:
-    return [case_status(db, row["entity_id"], cut=cut)
-            for row in current_entities(db, "case", cut=cut)
-            if row["payload"]["provider_id"] == provider_id]
+    """与机构相关的线索，按实际责任方而非仅牵头方筛选。"""
+    result = []
+    for row in current_entities(db, "case", cut=cut):
+        payload = row["payload"]
+        if provider_id in attribution.case_respondents(payload):
+            result.append(case_status(db, row["entity_id"], cut=cut))
+    return result
 
 
 def remediation_queue(db: Connection, *, at: datetime | None = None) -> dict:

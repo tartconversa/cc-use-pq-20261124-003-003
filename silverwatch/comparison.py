@@ -32,7 +32,15 @@ def compare_regions(db: Connection, *, regions: list[str], as_of: datetime,
         confirmed = sum(row["substantiated"] for row in document["areas"])
         pending = sum(row["pending"] for row in document["areas"])
         incomplete = sum(row["reconciliation_incomplete_batches"] for row in document["areas"])
+        attribution = document.get("attribution", {})
         results.append({"region": region, "exposed": exposed, "nonresponse": nonresponse,
+                        "attributed_people": attribution.get("attributed_people"),
+                        "shared_people": attribution.get("shared_people"),
+                        "unallocated_people": attribution.get("unallocated_people"),
+                        "unattributed_people": attribution.get("unattributed_people"),
+                        "activity_count": attribution.get("activity_count"),
+                        "joint_activity_count": attribution.get("joint_activity_count"),
+                        "attribution_basis": attribution.get("attribution_basis"),
                         "confirmed": confirmed, "pending": pending,
                         "coverage_bp": round(exposed * 10_000 / (exposed + nonresponse))
                             if exposed + nonresponse else None,
@@ -45,7 +53,7 @@ def compare_regions(db: Connection, *, regions: list[str], as_of: datetime,
     return {"cut": selected_cut, "as_of": as_of.isoformat(), "service_kind": service_kind,
             "cohort": cohort, "policy_id": policy.policy_id,
             "regions": results,
-            "comparison_note": "Values are comparable only for the same time cut, policy, service and cohort; unknown exposure is not treated as zero risk."}
+            "comparison_note": "Values are comparable only for the same time cut, policy, service and cohort; shared rosters are counted once per activity, attributed, shared and unallocated groups are shown separately, and unknown exposure is not treated as zero risk."}
 
 
 def rank_by_confirmed_rate(result: dict) -> list[dict]:

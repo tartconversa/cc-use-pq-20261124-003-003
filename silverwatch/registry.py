@@ -6,6 +6,7 @@ from sqlite3 import Connection
 
 from pydantic import ValidationError
 
+from silverwatch import attribution
 from silverwatch.contracts import NeedBatch, Provider, TouchBatch
 from silverwatch.errors import invalid
 from silverwatch.ledger import append, current_entities, latest
@@ -17,9 +18,14 @@ def register_provider(db: Connection, provider: Provider, source_ref: str, revis
 
 
 def register_touch(db: Connection, batch: TouchBatch) -> dict:
-    providers = latest(db, "provider")
-    if not any(row["entity_id"] == batch.provider_id for row in providers):
+    providers = {row["entity_id"] for row in latest(db, "provider")}
+    if batch.provider_id not in providers:
         raise invalid("provider_missing", "触达批次的服务提供方尚未登记")
+    missing = sorted(set(attribution.participant_ids(batch.model_dump(mode="json")))
+                     - providers)
+    if missing:
+        raise invalid("participant_missing", "联合活动的参与机构尚未登记",
+                      {"provider_ids": missing})
     return append(db, "touch", batch.batch_id, batch.source_revision,
                   batch.source_ref, batch.model_dump(mode="json"), batch.observed_at)
 
@@ -32,7 +38,8 @@ def register_need(db: Connection, batch: NeedBatch) -> dict:
 def register_case(db: Connection, body: dict, source_ref: str, revision: int) -> dict:
     required = {"case_id", "provider_id", "batch_id", "kind", "severity", "reported_at",
                 "allegation", "source_ref", "affected_people", "status"}
-    if set(body) != required:
+    optional = {"scope", "respondent_provider_ids"}
+    if not required <= set(body) or set(body) - required - optional:
         raise invalid("case_shape", "线索记录字段不完整或包含未支持字段")
     try:
         from silverwatch.contracts import Case
@@ -40,15 +47,25 @@ def register_case(db: Connection, body: dict, source_ref: str, revision: int) ->
         case = Case.model_validate(body)
     except ValidationError as exc:
         raise invalid("case_invalid", "线索记录不符合业务字段", exc.errors(include_url=False)) from exc
-    if not any(row["entity_id"] == case.provider_id for row in current_entities(db, "provider")):
+    providers = {row["entity_id"] for row in current_entities(db, "provider")}
+    if case.provider_id not in providers:
         raise invalid("provider_missing", "线索指向的服务提供方尚未登记")
     if not any(row["entity_id"] == case.batch_id for row in current_entities(db, "touch")):
         raise invalid("touch_missing", "线索分母批次尚未登记")
     batch = next(row["payload"] for row in current_entities(db, "touch") if row["entity_id"] == case.batch_id)
+    try:
+        targets = attribution.case_targets_for(case.model_dump(mode="json"), batch)
+    except (KeyError, ValueError) as exc:
+        raise invalid("case_scope", "线索归属与活动参与方不一致", {"reason": str(exc)}) from exc
+    missing = sorted(set(targets["respondent_provider_ids"]) - providers)
+    if missing:
+        raise invalid("provider_missing", "线索责任机构尚未登记", {"provider_ids": missing})
+    body = case.model_dump(mode="json")
+    if not body["respondent_provider_ids"]:
+        body["respondent_provider_ids"] = targets["respondent_provider_ids"]
     if case.affected_people > batch["exposed_people"] + batch["nonresponse_people"]:
         raise invalid("case_population", "影响人数不能超过触达及未回应总人数")
-    return append(db, "case", case.case_id, revision, source_ref,
-                  case.model_dump(mode="json"), case.reported_at)
+    return append(db, "case", case.case_id, revision, source_ref, body, case.reported_at)
 
 
 def catalog(db: Connection, *, region: str | None = None, cut: int | None = None) -> list[dict]:
@@ -69,7 +86,8 @@ def touch_facts(db: Connection, *, region: str | None = None, cut: int | None = 
         value = row["payload"]
         if region and value["region"] != region:
             continue
-        result.append({**value, "event_seq": row["seq"], "digest": row["digest"]})
+        result.append({**value, "attribution": attribution.summary(value),
+                       "event_seq": row["seq"], "digest": row["digest"]})
     return result
 
 

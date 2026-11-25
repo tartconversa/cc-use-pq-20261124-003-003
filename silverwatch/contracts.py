@@ -45,6 +45,17 @@ class Provider(Strict):
         return self
 
 
+class Participant(Strict):
+    """联合活动的参与机构及其在该活动中的服务内容。"""
+    provider_id: Key
+    role: Literal["lead", "co_host"] = "co_host"
+    service_kind: ServiceKind | None = None
+    service_content: Text | None = None
+    commitment: Text | None = None
+    attributed_people: Annotated[int, Field(ge=0, le=100_000_000)] | None = None
+    completed_services: Annotated[int, Field(ge=0, le=100_000_000)] | None = None
+
+
 class TouchBatch(Strict):
     batch_id: Key
     campaign_id: Key
@@ -61,6 +72,10 @@ class TouchBatch(Strict):
     report_count: Annotated[int, Field(ge=0, le=10_000_000)]
     nonresponse_people: Annotated[int, Field(ge=0, le=100_000_000)] = 0
     coverage_complete: bool = True
+    participants: Annotated[list[Participant], Field(max_length=20)] = Field(default_factory=list)
+    participants_complete: bool = True
+    shared_people: Annotated[int, Field(ge=0, le=100_000_000)] | None = None
+    unallocated_people: Annotated[int, Field(ge=0, le=100_000_000)] | None = None
     source_revision: Annotated[int, Field(ge=1, le=1_000_000)]
     source_ref: Text
     observed_at: datetime
@@ -71,6 +86,26 @@ class TouchBatch(Strict):
             raise ValueError("触达统计期必须为正区间")
         if self.exposed_people + self.nonresponse_people < self.report_count:
             raise ValueError("触达及未回应总人数不能小于线索数")
+        if not self.participants:
+            if self.shared_people not in (None, 0) or self.unallocated_people not in (None, 0):
+                raise ValueError("单一服务方的触达不能声明共享或未分配人数")
+            return self
+        identities = [row.provider_id for row in self.participants]
+        if len(set(identities)) != len(identities):
+            raise ValueError("联合活动不能重复登记同一参与机构")
+        if self.provider_id not in identities:
+            raise ValueError("牵头服务方必须是活动参与机构")
+        leads = [row for row in self.participants if row.role == "lead"]
+        if len(leads) != 1 or leads[0].provider_id != self.provider_id:
+            raise ValueError("联合活动必须有且仅有一家牵头机构")
+        attributed = sum(row.attributed_people or 0 for row in self.participants)
+        if attributed > self.exposed_people:
+            raise ValueError("各参与方专门服务人数不能超过活动触达总人数")
+        if self.shared_people is not None or self.unallocated_people is not None:
+            shared = self.shared_people or 0
+            unallocated = self.unallocated_people or 0
+            if attributed + shared + unallocated != self.exposed_people:
+                raise ValueError("明确声明的归属人数必须与活动触达总人数一致")
         return self
 
 
@@ -85,6 +120,17 @@ class Case(Strict):
     source_ref: Text
     affected_people: Annotated[int, Field(ge=0, le=1_000_000)]
     status: Literal["open", "investigating", "closed"] = "open"
+    scope: Literal["provider_service", "joint_campaign"] = "provider_service"
+    respondent_provider_ids: Annotated[list[Key], Field(max_length=20)] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def respondents(self):
+        if len(set(self.respondent_provider_ids)) != len(self.respondent_provider_ids):
+            raise ValueError("责任机构不能重复")
+        if self.scope == "provider_service" and self.respondent_provider_ids not in (
+                [], [self.provider_id]):
+            raise ValueError("针对具体服务的线索只能由该服务方承担责任")
+        return self
 
 
 class NeedBatch(Strict):

@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from sqlite3 import Connection
 
-from silverwatch import cases
+from silverwatch import attribution, cases
 from silverwatch.ledger import current_entities
 
 
@@ -30,29 +30,46 @@ def reconcile(db: Connection, *, cut: int | None = None,
         if len(reports) > declared:
             problems.append("case_intake_exceeds_declaration")
         provider = providers.get(batch["provider_id"])
+        scope = attribution.activity_scope(batch)
         if provider is None:
             problems.append("provider_missing")
         elif (provider["region"] != batch["region"] or
               provider["district"] != batch["district"] or
-              provider["service_kind"] != batch["service_kind"]):
+              (not scope["joint"] and provider["service_kind"] != batch["service_kind"])):
             problems.append("provider_scope_changed")
+        missing_participants = [key for key in scope["participant_ids"] if key not in providers]
+        if missing_participants:
+            problems.append("participant_missing")
         wrong_scope = [case["case_id"] for case in reports
-                       if case["provider_id"] != batch["provider_id"]]
+                       if not (set(attribution.case_respondents(case, batch))
+                               & set(scope["participant_ids"]))]
         if wrong_scope:
             problems.append("case_provider_mismatch")
         if batch["exposed_people"] == 0 and batch["report_count"]:
             problems.append("reports_without_exposure")
+        if scope["joint"] and (not scope["participants_complete"]
+                               or scope["unallocated_people"]):
+            problems.append("attribution_incomplete")
         results.append({"batch_id": batch_id, "provider_id": batch["provider_id"],
+                        "participant_provider_ids": scope["participant_ids"],
                         "declared_reports": declared, "received_cases": len(reports),
                         "difference": declared - len(reports), "wrong_scope_cases": wrong_scope,
+                        "attributed_people": scope["attributed_people"],
+                        "shared_people": scope["shared_people"],
+                        "unallocated_people": scope["unallocated_people"],
+                        "attribution_basis": scope["basis"],
                         "complete": not problems, "problems": problems,
                         "event_seq": row["seq"]})
     orphan_cases = sorted(row["entity_id"] for row in case_rows
                           if row["payload"]["batch_id"] not in known_batches)
+    duplicates = attribution.duplicate_roster_batches(
+        [row["payload"] for row in known_batches.values()])
     return {"cut": cut, "as_of": as_of.isoformat() if as_of else None,
             "batch_count": len(results), "complete_batch_count": sum(row["complete"] for row in results),
             "unmatched_case_ids": orphan_cases,
-            "complete": not orphan_cases and all(row["complete"] for row in results),
+            "duplicate_roster_batches": sorted(duplicates),
+            "complete": (not orphan_cases and not duplicates
+                         and all(row["complete"] for row in results)),
             "batches": results}
 
 
@@ -66,7 +83,8 @@ def quality_summary(db: Connection, *, cut: int | None = None,
                     as_of: datetime | None = None) -> dict:
     report = reconcile(db, cut=cut, as_of=as_of)
     totals = {"declared_reports": 0, "received_cases": 0, "unmatched_reports": 0,
-              "wrong_scope_cases": 0, "incomplete_batches": 0}
+              "wrong_scope_cases": 0, "incomplete_batches": 0,
+              "duplicate_roster_batches": len(report["duplicate_roster_batches"])}
     categories: dict[str, int] = defaultdict(int)
     for row in report["batches"]:
         totals["declared_reports"] += row["declared_reports"]

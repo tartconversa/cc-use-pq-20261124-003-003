@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from sqlite3 import Connection
 
-from silverwatch import cases, evidence, registry, review
+from silverwatch import attribution, cases, evidence, registry, review
 from silverwatch.errors import missing
 from silverwatch.ledger import current_entities, history, revisions
 
@@ -14,18 +14,54 @@ def provider_profile(db: Connection, provider_id: str, *, cut: int | None = None
                      if row["provider_id"] == provider_id), None)
     if provider is None:
         raise missing("provider", provider_id)
-    touch_batches = [row for row in registry.touch_facts(db, cut=cut)
-                     if row["provider_id"] == provider_id]
+    all_batches = registry.touch_facts(db, cut=cut)
+    activity_rows = []
+    seen = set()
+    for group in attribution.activity_groups(all_batches).values():
+        member_batches = [row for row in group
+                          if provider_id in attribution.participant_ids(row)]
+        if not member_batches:
+            continue
+        # 同一活动的重复名单只记录一次参与，人数按活动计。
+        batch = min(member_batches, key=lambda row: row["batch_id"])
+        seen.add(attribution.activity_key(batch))
+        detail = attribution.participant_activity(batch, provider_id)
+        activity_rows.append({**detail,
+                              "district": batch["district"], "cohort": batch["cohort"],
+                              "channel": batch["channel"],
+                              "activity_people": batch["exposed_people"],
+                              "nonresponse_people": batch["nonresponse_people"],
+                              "batch_id": batch["batch_id"],
+                              "batch_ids": sorted(row["batch_id"] for row in group)})
+    participating = [row for row in all_batches
+                     if provider_id in attribution.participant_ids(row)]
     related = review.cases_for_provider(db, provider_id, cut=cut)
     by_finding = defaultdict(int)
     for item in related:
         by_finding[item["finding"]["finding"]] += 1
+    attributed = sum(row["attributed_people"] for row in activity_rows)
     return {"provider": provider,
-            "activity": {"touch_batches": len(touch_batches),
-                         "exposed_people": sum(item["exposed_people"] for item in touch_batches),
-                         "unanswered_people": sum(item["nonresponse_people"] for item in touch_batches),
+            "activity": {"touch_batches": len(participating),
+                         "activity_count": len(activity_rows),
+                         "exposed_people": sum(row["activity_people"] for row in activity_rows),
+                         "attributed_people": attributed,
+                         "shared_people": sum(row["shared_people"] for row in activity_rows),
+                         "unallocated_people": sum(row["unallocated_people"] for row in activity_rows),
+                         "unanswered_people": sum(row["nonresponse_people"] for row in activity_rows),
+                         "joint_activity_count": sum(row["joint"] for row in activity_rows),
+                         "participant_activity_count": sum(
+                             row["participant_count"] for row in activity_rows),
+                         "attribution_basis": _basis(activity_rows),
+                         "participation": activity_rows,
                          "case_count": len(related), "findings": dict(sorted(by_finding.items()))},
             "cases": related, "cut": cut}
+
+
+def _basis(rows: list[dict]) -> str:
+    values = {row["attribution_basis"] for row in rows}
+    if not values:
+        return "no_activity"
+    return next(iter(values)) if len(values) == 1 else "mixed"
 
 
 def district_overview(db: Connection, region: str, *, cut: int | None = None,
@@ -39,18 +75,33 @@ def district_overview(db: Connection, region: str, *, cut: int | None = None,
     findings = cases.all_findings(db, cut=cut, as_of=as_of)
     areas = defaultdict(lambda: {"providers": 0, "capacity_per_month": 0,
                                  "exposed_people": 0, "nonresponse_people": 0,
+                                 "attributed_people": 0, "shared_people": 0,
+                                 "unallocated_people": 0, "activity_count": 0,
+                                 "joint_activity_count": 0,
+                                 "participant_activity_count": 0,
                                  "reported_issues": 0, "substantiated": 0,
-                                 "pending": 0, "inconclusive": 0, "estimated_need": 0})
+                                 "pending": 0, "inconclusive": 0, "estimated_need": 0,
+                                 "attribution_bases": defaultdict(int)})
     for row in providers:
         area = areas[row["district"]]
         area["providers"] += 1
         if row["status"] == "active":
             area["capacity_per_month"] += row["capacity_per_month"]
-    for row in batches:
-        area = areas[row["district"]]
-        area["exposed_people"] += row["exposed_people"]
-        area["nonresponse_people"] += row["nonresponse_people"]
-        area["reported_issues"] += row["report_count"]
+    duplicates = attribution.duplicate_roster_batches(batches)
+    for group in attribution.activity_groups(batches).values():
+        primary = min(group, key=lambda row: row["batch_id"])
+        area = areas[primary["district"]]
+        scope = attribution.activity_scope(primary)
+        area["exposed_people"] += primary["exposed_people"]
+        area["nonresponse_people"] += primary["nonresponse_people"]
+        area["attributed_people"] += scope["attributed_people"]
+        area["shared_people"] += scope["shared_people"]
+        area["unallocated_people"] += scope["unallocated_people"]
+        area["activity_count"] += 1
+        area["joint_activity_count"] += int(scope["joint"])
+        area["participant_activity_count"] += scope["participant_count"]
+        area["attribution_bases"][scope["basis"]] += 1
+        area["reported_issues"] += primary["report_count"]
     for row in demand:
         areas[row["district"]]["estimated_need"] += row["estimated_people"]
     for row in cases_now:
@@ -65,13 +116,24 @@ def district_overview(db: Connection, region: str, *, cut: int | None = None,
     for district, value in sorted(areas.items()):
         exposure = value["exposed_people"]
         total = exposure + value["nonresponse_people"]
+        bases = value.pop("attribution_bases")
+        value["attribution_basis"] = (next(iter(bases)) if len(bases) == 1
+                                      else "mixed" if bases else "no_activity")
+        value["attribution_basis_counts"] = dict(sorted(bases.items()))
         value["touch_coverage_bp"] = round(exposure * 10_000 / total) if total else None
         value["reported_issues_per_1000"] = round(value["reported_issues"] * 1000 / exposure, 2) if exposure else None
         value["supply_per_need_bp"] = round(value["capacity_per_month"] * 10_000 / value["estimated_need"]) if value["estimated_need"] else None
         result.append({"district": district, **value})
+    summary = attribution.totals(batches)
     return {"region": region, "as_of": as_of.isoformat() if as_of else None,
             "cut": cut, "areas": result, "provider_total": len(providers),
-            "touch_batch_total": len(batches), "case_total": len(cases_now)}
+            "touch_batch_total": len(batches),
+            "activity_total": summary["activity_count"], "case_total": len(cases_now),
+            "attribution": {**summary,
+                            "unattributed_people": (summary["shared_people"]
+                                                    + summary["unallocated_people"]),
+                            "duplicate_roster_batches": sorted(duplicates)},
+            "note": "活动人数按活动去重；专门归属、共享与未分配人数分别列出，同一批老人不会按参与机构重复计入。"}
 
 
 def case_timeline(db: Connection, case_id: str, *, cut: int | None = None,
@@ -114,8 +176,15 @@ def validate_references(db: Connection, *, cut: int | None = None) -> dict:
         batch = touches.get(item["batch_id"])
         if batch is None:
             problems.append({"entity": row["entity_id"], "issue": "touch_missing"})
-        elif batch["provider_id"] != item["provider_id"]:
+            continue
+        participants = set(attribution.participant_ids(batch))
+        respondents = set(attribution.case_respondents(item, batch))
+        if item["provider_id"] not in participants:
             problems.append({"entity": row["entity_id"], "issue": "provider_scope_mismatch"})
+        elif not respondents <= participants:
+            problems.append({"entity": row["entity_id"], "issue": "respondent_scope_mismatch"})
+        elif item.get("scope") == "joint_campaign" and not attribution.is_joint(batch):
+            problems.append({"entity": row["entity_id"], "issue": "joint_scope_without_joint_activity"})
     for row in needs:
         item = row["payload"]
         if item["period_end"] <= item["period_start"]:

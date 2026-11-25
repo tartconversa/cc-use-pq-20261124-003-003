@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from sqlite3 import Connection
 
-from silverwatch import cases, evidence, reconciliation, registry
+from silverwatch import attribution, cases, evidence, reconciliation, registry
 from silverwatch.ledger import current_entities
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -37,8 +37,12 @@ def investigation_queue(db: Connection, *, region: str | None = None,
             reasons.append("review_incomplete")
         if not any(item["verified"] for item in material):
             reasons.append("verified_evidence_missing")
+        respondents = attribution.case_respondents(body, batch)
         items.append({"case_id": body["case_id"], "provider_id": body["provider_id"],
-                      "batch_id": body["batch_id"], "district": batch["district"] if batch else None,
+                      "batch_id": body["batch_id"],
+                      "scope": body.get("scope", "provider_service"),
+                      "respondent_provider_ids": respondents,
+                      "district": batch["district"] if batch else None,
                       "severity": body["severity"], "status": body["status"],
                       "finding": finding["finding"], "age_days": age,
                       "missing_roles": missing_roles, "evidence_count": len(material),
@@ -81,8 +85,12 @@ def area_attention(db: Connection, *, region: str, as_of: datetime,
         rank = 0 if "reports_without_exposure" in batch["problems"] else 1
         if "case_provider_mismatch" in batch["problems"]:
             rank = min(rank, 0)
+        if "attribution_incomplete" in batch["problems"]:
+            rank = min(rank, 0)
         items.append({"district": provider["district"], "service_kind": provider["service_kind"],
                       "provider_id": batch["provider_id"], "batch_id": batch["batch_id"],
+                      "participant_provider_ids": batch.get("participant_provider_ids", []),
+                      "attribution_basis": batch.get("attribution_basis"),
                       "difference": batch["difference"], "reasons": batch["problems"],
                       "priority": rank})
     items.sort(key=lambda item: (item["priority"], -abs(item["difference"]),

@@ -19,6 +19,8 @@ def run_fixture(path: str | Path) -> dict:
         with store.transaction(write=True) as db:
             provider = Provider.model_validate(fixture["provider"])
             registry.register_provider(db, provider, "provider-register", 1)
+            co_provider = Provider.model_validate(fixture["co_provider"])
+            registry.register_provider(db, co_provider, "provider-register", 1)
             touch = TouchBatch.model_validate(fixture["touch"])
             registry.register_touch(db, touch)
             need = NeedBatch.model_validate(fixture["need"])
@@ -54,4 +56,5 @@ def run_fixture(path: str | Path) -> dict:
                                  "digest": bulletin["bulletin_digest"],
                                  "case_counts": bulletin["document"]["case_counts"],
                                  "area_count": len(bulletin["document"]["areas"])},
+                    "attribution": bulletin["document"]["attribution"],
                     "service_plan": plan["totals"]}

@@ -50,6 +50,10 @@ def approval_set(db: Connection, analysis_id: str, revision: int | None = None) 
         failures.append("approval_denied")
     if document["risk_flags"]:
         failures.append("risk_flags_present")
+    if document.get("attribution", {}).get("duplicate_roster_batches"):
+        failures.append("duplicate_roster_batches")
+    if document.get("attribution", {}).get("possible_roster_overlaps"):
+        failures.append("roster_overlap_unverified")
     if any(area["open_severe"] for area in document["areas"]):
         failures.append("severe_case_open")
     return {"analysis_id": analysis_id, "revision": row["revision"], "digest": row["digest"],
